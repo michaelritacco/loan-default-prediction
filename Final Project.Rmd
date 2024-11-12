@@ -1,0 +1,484 @@
+---
+title: "Final Project"
+author: "Michael Ritacco"
+date: "2024-04-14"
+output:
+  word_document: 
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import Data and Required Libraries
+
+```{r}
+# Import Dependencies
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(caret)
+  library(randomForest)
+  library(MLmetrics)
+  library(PRROC)
+  library(xgboost)
+  library(reshape2)
+  library(tidyr)
+  library(parallel)
+  library(doParallel)
+})
+
+# Get the number of cores
+no_cores = detectCores() - 1  
+# Register the number of cores to parallelize the model fitting
+registerDoParallel(cores = no_cores)
+```
+
+```{r}
+# Read in the data
+df = read.csv('loan_default.csv')
+
+# Output the first 5 rows of the dataset
+head(df)
+```
+
+# Data Preprocessing
+
+## Data Cleaning
+
+```{r}
+# Get the column names
+colnames(df)
+
+# Removing the index column
+df = df[-1]
+```
+
+## Examining Dataset Structure
+```{r}
+# Examine the structure of the dataset
+str(df)
+
+# Get the total number of observations
+n = nrow(df)
+
+# Get the number of columns
+p = ncol(df)
+
+# Output the number of observations and columns 
+cat("There are", n, 'observations and ', p, 'columns in our dataset.')
+```
+
+## Check for Missing Values
+
+```{r}
+# Check for missing values across columns
+colSums(is.na(df))
+```
+
+## Encode Categorical Variables
+
+```{r}
+# Define vector of continuous variables
+continuous_vars = c(
+  'Age', 'Income', 'LoanAmount', 'CreditScore',
+  'MonthsEmployed', 'InterestRate', 'DTIRatio'
+)
+
+# Define vector of categorical variables
+categorical_vars = c(
+  'Education', 'EmploymentType', 'MaritalStatus',
+  'HasMortgage', 'HasDependents', 'LoanPurpose', 'HasCoSigner'
+)
+
+# Define vector of ordinal variables
+ordinal_vars = c(
+  'NumCreditLines', 'LoanTerm'
+)
+
+# Define target variable
+target = 'Default'
+
+# Encode categorical variable as a factor
+for (var in c(categorical_vars, ordinal_vars)) {
+  df[[var]] = as.factor(df[[var]])
+}
+
+# Encode target variable as a factor
+df$Default = factor(df$Default, levels = c('1', '0'), labels = c('Default', 'NonDefault'))
+```
+
+
+# Exploratory Data Analysis
+
+## Distribution of Continuous Variables
+
+```{r}
+# Calculate the summary statistics
+summary(df[continuous_vars])
+```
+
+```{r dpi=300, fig.width=10, fig.height=10}
+# Define custom theme for plotting
+my_custom_theme =  theme(
+    text = element_text(size = 16),  # Sets global text size for all text elements
+    plot.title = element_text(hjust = 0.5, size = 18, face = "bold", margin = ggplot2::margin(t = 20, b = 10)),  # Specific title adjustments
+    axis.title = element_text(size = 16),  # Axis titles
+    axis.text = element_text(size = 14),  # Axis text
+    legend.title = element_text(size = 16),  # Legend title
+    legend.text = element_text(size = 14)  # Legend text
+  )
+
+# Set custom theme as the default for all subsequent plots
+theme_set(my_custom_theme)
+
+# Reshape the dataframe to long format for plotting
+df_long = melt(df, measure.vars = continuous_vars)
+
+# Create a named vector to map variable names to proper labels when plotting
+var_labels = c(
+  Age = 'Age', Income = 'Income', LoanAmount = 'Loan Amount', 
+  CreditScore = 'Credit Score', MonthsEmployed = 'Months Employed',
+  NumCreditLines = 'Number of Credit Lines', InterestRate = 'Interest Rate',
+  LoanTerm = 'Loan Term', DTIRatio = 'DTI Ratio', Education = 'Education', 
+  EmploymentType = 'Employment Type', MaritalStatus = 'Marital Status', 
+  HasMortgage = 'Has Mortgage', HasDependents = 'Has Dependents',
+  LoanPurpose = 'Loan Purpose', HasCoSigner = 'Has Co Signer', 
+  Default = 'Loan Status'
+)
+
+# Generate KDE plots for each continuous variable
+ggplot(df_long, aes(x = value)) +
+  geom_density(color = 'steelblue', fill = 'steelblue', alpha = 0.5) +  
+  facet_wrap(~ variable, scales = 'free', ncol = 3,
+             labeller = labeller(variable = var_labels)) + 
+  labs(title = 'Figure 1: Kernel Density Estimate of Continuous Variables',
+       x = 'Value', y = 'Density') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r dpi=300, fig.width=12, fig.height=10}
+# Generate KDE plots for each continuous variable grouped by loan status
+ggplot(df_long, aes(x = value, color = Default, fill = Default)) +
+  geom_density(alpha = 0.5) +  
+  facet_wrap(~ variable, scales = 'free', 
+             labeller = labeller(variable = var_labels), ncol = 3) +  
+  labs(title = 'Figure 2: Kernel Density Estimate of Continuous Variables Grouped by Loan Status',
+       x = 'Value',
+       y = 'Density') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.5)) 
+```
+
+## Distribution of Target Variable
+
+```{r dpi=300, fig.width=4, fig.height=4}
+#  Calculate counts of the loan default status in the dataframe
+default_counts = table(df$Default) 
+# Calculate proportions of each loan Default status relative to the total
+default_proportions = (default_counts / n) * 100
+
+# Create and output a data frame for plotting, labeling each category and converting counts and proportions to vectors
+default_df = data.frame(
+  Status = c('Default', 'Non-Default'), # Define categories of loan status
+  Count = as.vector(default_counts), # Include counts of each category
+  Percent = as.vector(default_proportions) # Include percentage of each category
+  )
+default_df
+
+# Generate a pie chart to visualize the distribution of loan default status
+ggplot(data = default_df, aes(x = '', y = Percent, fill = Status)) +
+  geom_bar(stat = 'identity', width = 1) +
+  coord_polar(theta = 'y') +
+  geom_text(aes(label = sprintf('%.1f%%', Percent)), position = position_stack(vjust = 0.6)) +
+  theme_void() + 
+  labs(title = 'Figure 3: Distribution of Loan Status')
+```
+
+## Distribution of Categorical and Ordinal Variables   
+
+```{r dpi=300, fig.width=10, fig.height=10}
+# Generate summary statistics for categorical and ordinal variables 
+summary(df[c(categorical_vars, ordinal_vars)])
+
+# Reshape the dataframe to long format for plotting of categorical and ordinal variables
+df_long_cat = df[c(categorical_vars, ordinal_vars, target)] %>%
+  pivot_longer(cols = -Default, names_to = 'variable', values_to = 'value')
+
+# Plot bar charts for each categorical and ordinal variable
+ggplot(data = df_long_cat) +
+  geom_bar(aes(x = value), fill = 'steelblue') +
+  labs(title = 'Figure 4: Barplot of Categorical Variables', x = 'Variable Categories', y = '') +
+  facet_wrap( ~ variable, scales = 'free', labeller = labeller(variable = var_labels)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.5)) 
+  
+# Plot bar charts for each categorical and ordinal variable grouped by loan default status
+ggplot(data = df_long_cat) +
+  geom_bar(aes(x = value, fill = Default, color = Default)) +
+  labs(title = 'Figure 5: Barplot of Categorical Variables by Loan  Status', x = 'Variable Categories', y = '') +
+  facet_wrap( ~ variable, scales = 'free', labeller = labeller(variable = var_labels)) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.5)) 
+```
+
+## Outlier Detection 
+
+```{r dpi=300, fig.width=12, fig.height=10}
+# Plot a boxplot for each continuous variable to detect outliers
+ggplot(df_long, aes(x = '', y = value)) +
+  stat_boxplot(geom = 'errorbar',
+               width = 0.25) + 
+  geom_boxplot(fill = 'steelblue') +
+  facet_wrap(~ variable, scales = 'free', 
+             labeller = labeller(variable = var_labels), ncol = 3) +
+  labs(title = 'Figure 6: Boxplots of Continuous Variables', 
+       x = 'Variable', y = 'Value')
+```
+
+```{r dpi=300, fig.width=12, fig.height=10}
+# Plot a boxplot for each continuous variable grouped by loan default status to detect outliers
+ggplot(df_long, aes(x = Default, y = value, fill = Default)) +
+  geom_boxplot() + 
+  stat_boxplot(geom = 'errorbar',
+               width = 0.25) + 
+  facet_wrap(~ variable, scales = 'free', labeller = labeller(variable = var_labels))  + 
+  labs(title = 'Figure 7: Boxplots of Continuous Variables Grouped by Loan Status', 
+       x = 'Loan Status', y = 'Value')
+```
+
+# Main Data Analysis
+
+## Spliting the data into train/validation/test sets
+
+```{r}
+# Encode ordinal variable properly as an ordered factor
+for (var in ordinal_vars) {
+  df[[var]] = factor(df[[var]], ordered = TRUE)
+}
+
+# Define the feature matrix
+X = df[, -which(names(df) == target)]
+# Get the target variable
+y = df[[target]]
+
+# Split the dataset into two equal parts: 50% for initial training and 50% for further splitting into validation and test sets
+set.seed(123)
+trainIndex = createDataPartition(y, p = 0.5, list = FALSE, times = 1)
+X_train = X[trainIndex, ] 
+X_temp = X[-trainIndex, ]
+y_train = y[trainIndex]
+y_temp = y[-trainIndex]
+df_train = df[trainIndex, ]
+df_temp = df[-trainIndex, ]
+
+# Split the temp data into 20% validation and 30% test sets
+set.seed(123)
+valIndex = createDataPartition(y_temp, p = 0.4, list = FALSE, times = 1)
+X_val = X_temp[valIndex, ]
+X_test = X_temp[-valIndex, ]
+y_val = y_temp[valIndex]
+y_test = y_temp[-valIndex]
+df_val = df_temp[valIndex, ] 
+df_test = df_temp[-valIndex, ]
+```
+
+## Model Fitting with Cross-Validated Grid Search and Down Sampling
+
+```{r}
+# Define training control parameters for a cross-validated grid search
+train_control = trainControl(
+  method = 'cv',           # Use cross-validation
+  number = 5,              # Number of folds in cross-validation
+  classProbs = TRUE,       # Enable computation of class probabilities
+  sampling = 'down',       # Apply downsampling to address class imbalance
+  savePredictions = 'final', # Save predictions for the final model
+  summaryFunction = prSummary, # Use precision-recall summary function
+  allowParallel = TRUE     # Allow parallel processing
+)
+
+# Fit a logistic regression model using glmnet (elastic net regularization)
+set.seed(123) # Set seed for reproducibility
+lr_grid_search = train(
+  Default ~ .,            # Target variable Default predicted from all other variables
+  data = df_train,         # Training data
+  method = 'glmnet',       # Logistic Regression model with built-in feature selection
+  trControl = train_control, # Use defined training control settings
+  metric = 'AUC',          # Optimization metric is the Area Under the Precision-Recall Curve
+  tuneLength = 5           # Number of different parameter combinations
+)
+
+# Fit a Random Forest model using ranger implementation
+set.seed(123) # Set seed for reproducibility
+rf_grid_search = train(
+  Default ~ .,            # Target variable Default predicted from all other variables
+  data = df_train,         # Training data
+  method = 'ranger',       # Random Forest algorithm using ranger package
+  trControl = train_control, # Use defined training control settings
+  metric = 'AUC',          # Optimization metric is the Area Under the Precision-Recall Curve
+  importance = 'impurity', # Feature importance based on impurity reduction
+  tuneLength = 5           # Number of different parameter combinations to try
+)
+
+# Fit an XGBoost model
+xgb_grid_search = train(
+  Default ~ .,            # Target variable Default predicted from all other variables
+  data = df_train,         # Training data
+  method = 'xgbTree',       # XGBoost model using xgbTree package
+  trControl = train_control, # Use defined training control settings
+  metric = 'AUC',          # Optimization metric is the Area Under the Precision-Recall Curve
+  tuneLength = 5           # Number of different parameter combinations to try
+)
+```
+
+## Threshold Tuning and Model Validation
+
+```{r}
+# Define a function to calculate the optimal threshold using precision-recall curve
+calculateOptimalThreshold = function(y_pred_prob, df_val) {
+  # Calculate the precision-recall curve for predicted probabilities and actual default statuses
+  pr_curve_obj = pr.curve(scores.class0 = y_pred_prob, 
+                          weights.class0 = df_val$Default == 'Default', 
+                          curve = TRUE)
+  pr_curve = pr_curve_obj$curve # Extract the precision-recall curve data
+  
+  # Extract precision, recall, and threshold values from the curve
+  precisions = pr_curve[ , 1]
+  recalls = pr_curve[ , 2]
+  thresholds = pr_curve[ , 3]
+  # Calculate the area under the precision-recall curve
+  auc = pr_curve_obj$auc.integral
+  
+  # Compute F1 scores for each threshold and identify the index of the maximum F1 score
+  f1_scores = 2 * (precisions * recalls) / (precisions + recalls)
+  optimal_index = which.max(f1_scores)
+  optimal_threshold = thresholds[optimal_index]
+  optimal_precision = precisions[optimal_index]
+  optimal_recall = recalls[optimal_index]
+  optimal_f1_score = f1_scores[optimal_index]
+  
+  # Classify predictions based on the optimal threshold
+  y_pred = factor(ifelse(y_pred_prob > optimal_threshold, 'Default', 'NonDefault'), 
+                  levels = c('Default', 'NonDefault'))
+  y_val = df_val$Default
+  
+  # Generate a confusion matrix from predictions
+  cm = table(Predicted = y_pred, Actual = y_val)
+  
+  # Output the confusion matrix and performance metrics for the validation set
+  print('Performance on Validation Set:')
+  print(cm)
+  
+   # Calculate accuracy from the confusion matrix
+  optimal_accuracy = (cm['Default', 'Default'] + 
+                        cm['NonDefault', 'NonDefault']) / sum(cm)
+  
+  # Store and print optimal evaluation metrics
+  eval_metrics = c('Accuracy' = optimal_accuracy, 'Precision' = optimal_precision, 
+                   'Recall' = optimal_recall, 'AUC' = auc, 
+                   'F1-Score' = optimal_f1_score, 'Thresold' = optimal_threshold)
+  print('Optimal Metrics:')
+  print(eval_metrics)
+  
+  # Return the optimal threshold
+  return(optimal_threshold)
+}
+
+# Logistic Regression:
+# Get the predicted probabilities of default across the validation set
+y_val_pred_prob = predict(lr_grid_search, newdata = X_val, type = 'prob')[ , 'Default']
+# Calculate the optimal threshold for via AUPRC
+optimal_threshold_lr = calculateOptimalThreshold(y_val_pred_prob, df_val)
+
+# Random Forest:
+# Get the predicted probabilities of default across the validation set
+y_val_pred_prob = predict(rf_grid_search, newdata = X_val, type = 'prob')[ , 'Default']
+# Calculate the optimal threshold for via AUPRC
+optimal_threshold_rf = calculateOptimalThreshold(y_val_pred_prob, df_val)
+
+# XGBoost:
+# Get the predicted probabilities of default across the validation set
+y_val_pred_prob = predict(xgb_grid_search, newdata = X_val, type = 'prob')[ , 'Default']
+# Calculate the optimal threshold for via AUPRC
+optimal_threshold_xgb = calculateOptimalThreshold(y_val_pred_prob, df_val)
+```
+
+## Model Evaluation
+
+### Performce Metrics
+
+```{r}
+# Define a function to evaluate model performance based on predicted probabilities, an optimal threshold, test data, and a plot title
+evaluatePerformance = function(y_pred_prob, optimal_threshold, df_test, title) {
+  # Calculate the precision-recall curve for predicted probabilities and actual default status, then plot it
+  pr_curve_obj = pr.curve(scores.class0 = y_pred_prob, 
+                          weights.class0 = df_test$Default == 'Default', curve = TRUE)
+  plot(pr_curve_obj, main = title)
+  
+  # Extract the area under the precision-recall curve (AUC)
+  auc = pr_curve_obj$auc.integral
+  
+  # Prepare actual and predicted responses based on the optimal threshold
+  y_test = df_test$Default
+  y_pred = factor(ifelse(y_pred_prob > optimal_threshold, 'Default', 'NonDefault'), 
+                  levels = c('Default', 'NonDefault'))
+  
+  # Generate and output a confusion matrix to evaluate classification accuracy
+  cm = table(Predicted = y_pred, Actual = y_test)
+  print('Performance on Test Set:')
+  print(cm)
+  
+  # Calculate accuracy, precision, recall, and F1 score from the confusion matrix
+  accuracy = (cm['Default', 'Default'] + cm['NonDefault', 'NonDefault']) / sum(cm)
+  precision = cm['Default', 'Default'] / sum(cm['Default', ])
+  recall = cm['Default', 'Default'] / sum(cm[, 'Default'])
+  f1_score = 2 * (precision * recall) / (precision + recall)
+  
+  # Store, output, and return all evaluation metrics on the test set
+  eval_metrics = c('Accuracy' = accuracy, 'Precision' = precision,
+                   'Recall' = recall, 'AUC' = auc,
+                   'F1-Score' = f1_score, 'Thresold' = optimal_threshold)
+  print('Evaluation Metrics:')
+  print(eval_metrics)
+  return(eval_metrics)
+}
+
+# Evaluate Logistic Regression model performance on the test dataset and plot the PR curve
+y_test_pred_prob = predict(lr_grid_search, newdata = X_test, type = 'prob')[ , 'Default']
+perf_results_lr = evaluatePerformance(y_test_pred_prob, optimal_threshold_lr, df_test, title = 'Figure 8: PR Curve for Logisitc Model')
+
+# Evaluate Random Forest model performance on the test dataset and plot the PR curve
+y_test_pred_prob = predict(rf_grid_search, newdata = X_test, type = 'prob')[ , 'Default']
+perf_results_rf = evaluatePerformance(y_test_pred_prob, optimal_threshold_rf, df_test, title = 'Figure 9: PR Curve for Random Forest Model')
+
+# Evaluate XGBoost model performance on the test dataset and plot the PR curve
+y_test_pred_prob = predict(xgb_grid_search, newdata = X_test, type = 'prob')[ , 'Default']
+perf_results_xgb = evaluatePerformance(y_test_pred_prob, optimal_threshold_xgb, df_test, title = 'Figure 10: PR Curve for XGBoost Model')
+
+# Combine and output performance results from all models on the test set
+perf_results = rbind(perf_results_lr, perf_results_rf, perf_results_xgb)
+rownames(perf_results) = c('Logistic Regression', 'Random Forest', 'XGBoost')
+perf_results
+```
+
+### Variable Importance
+
+```{r dpi=300, fig.width=8, fig.height=8}
+# Retrieve the final model from the XGBoost grid search results
+best_xgboost_model = xgb_grid_search$finalModel
+# Compute variable importance scores from the XGBoost model without scaling the importance values
+var_importance = varImp(xgb_grid_search, scale = FALSE)
+
+# Create a dataframe for plotting, extracting variable names and their corresponding importance scores
+importance_df = data.frame(Variable = rownames(var_importance$importance),
+                           Importance = var_importance$importance$Overall)
+
+# Generate a bar plot of the variable importances from the XGBoost model
+ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = 'identity', fill = 'steelblue') +
+  coord_flip() +
+  labs(title = 'Figure 11: XGBoost Variable Importance Plot',
+       x = 'Variable', y = 'Importance') +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
